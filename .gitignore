@@ -1,0 +1,13 @@
+.DS_Store
+.claude/
+.codex/
+node_modules/
+*.log
+
+# 公開しない内部仕様・検証記録
+SPEC.md
+START_PROMPT.md
+tests.mjs
+ANSWER_QA.md
+BROWSER_QA.md
+LEGAL_REVIEW.md
