@@ -106,7 +106,7 @@
   function renderHome() {
     if (Handwriting) Handwriting.reset(false);
     state.screen = 'HOME';
-    app.innerHTML = '<section class="home"><div class="start-area"><div class="start-content"><h1 class="app-title"><span class="title-series"><span class="emoji-icon">👹</span> 高校入試対策シリーズ</span><span class="title-course">～大問2・割合・数量関係・不等式・自然数～</span></h1><button class="primary start-button" id="start-button" disabled>▶ スタート！</button><span class="sr-only" id="dependency-status" aria-live="polite">数式機能を読み込み中です</span><a class="about-link" href="legal.html">このアプリについて</a></div></div><aside class="history-card"><h2>学習の履歴</h2><div class="history-list" id="history-list"></div><hr><button class="danger" id="reset-button">この端末の記録を消す</button></aside></section>';
+    app.innerHTML = '<section class="home"><div class="start-area"><div class="start-content"><h1 class="app-title"><span class="title-series"><span class="emoji-icon">👹</span> 高校入試対策シリーズ</span><span class="title-course">～大問2・割合・数量関係～</span></h1><button class="primary start-button" id="start-button" disabled>▶ スタート！</button><span class="sr-only" id="dependency-status" aria-live="polite">数式機能を読み込み中です</span><a class="about-link" href="legal.html">このアプリについて</a></div></div><aside class="history-card"><h2>学習の履歴</h2><div class="history-list" id="history-list"></div><hr><button class="danger" id="reset-button">この端末の記録を消す</button></aside></section>';
     const historyList = document.getElementById('history-list');
     const items = historyItems();
     if (!items.length) historyList.append(element('p', 'history-empty', 'まだ記録はありません。'));
@@ -313,7 +313,10 @@
     state.answers.push({ question, ok, code, raw: recordedRaw });
     const field = document.getElementById('answer-field');
     field.setAttribute('readonly', '');
-    document.getElementById('submit-button').disabled = true;
+    const submit = document.getElementById('submit-button');
+    submit.disabled = false;
+    submit.textContent = state.index + 1 === state.questions.length ? '結果を見る' : '次へ';
+    submit.addEventListener('click', nextQuestion, { once: true });
     document.getElementById('hint-button').disabled = true;
     document.querySelectorAll('[data-insert]').forEach(button => { button.disabled = true; });
 
@@ -326,9 +329,7 @@
       feedback.append(element('p', '', `確認ポイント：${feedbackPoint(code)}`));
       const solution = element('div', 'part-line'); renderParts(solution, question.workedSolution); feedback.append(solution);
     } else feedback.append(element('p', '', 'その調子。次の問題へ進みましょう。'));
-    const next = element('button', 'primary next-button', state.index + 1 === state.questions.length ? '結果を見る' : '次へ');
-    next.addEventListener('click', nextQuestion);
-    area.append(feedback, next);
+    area.append(feedback);
     typeset(area);
   }
 
