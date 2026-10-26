@@ -158,13 +158,18 @@
   }
 
   function renderQuestion() {
+    // 作り直す前の入力欄からフォーカスを外す（MathLive が外した欄を参照してエラーを出さないように）
+    const oldField = document.getElementById('answer-field');
+    if (oldField && typeof oldField.blur === 'function') { try { oldField.blur(); } catch (_) {} }
     state.screen = 'QUESTION';
     state.hintLevel = 0;
     state.locked = false;
     const question = state.questions[state.index];
     const total = state.questions.length;
-    app.innerHTML = `<section class="screen"><header class="topbar"><button class="secondary quit-button" id="quit-button" type="button">中断</button><h1>${state.sessionMode === 'review' ? 'まちがいだけ復習' : '割合・数量関係'}</h1><span class="question-number">Q ${state.index + 1} / ${total}</span></header><div class="progress" aria-label="進捗"><span style="width:${state.index / total * 100}%"></span></div><div class="work-layout"><article class="problem-card"><div class="prompt part-line" id="prompt"></div><label class="answer-label" for="answer-field">${answerInstruction(question)}</label><div class="answer-row"><div class="input-wrap"><math-field id="answer-field" virtual-keyboard-mode="off" inputmode="latin" aria-label="${answerInstruction(question)}"></math-field></div><span class="answer-unit" id="answer-unit"></span></div><p class="helper">${helperText(question)}</p><div class="input-tools" id="input-tools" aria-label="入力補助"><button class="secondary" data-insert="\\frac{#0}{#?}">分数</button><button class="secondary" data-insert="x">x</button><button class="secondary" data-insert="y">y</button><button class="secondary" data-insert="a">a</button><button class="secondary" data-insert="b">b</button><button class="secondary" data-insert=",">,</button><button class="secondary" data-insert="<">&lt;</button><button class="secondary" data-insert="\\le">≦</button><button class="secondary" data-insert=">">&gt;</button><button class="secondary" data-insert="\\ge">≧</button></div><div class="submit-row"><button class="primary" id="submit-button" disabled>決定</button></div></article><aside class="support-card"><h2>ヒント・解説</h2><button class="secondary hint-button" id="hint-button">ヒント1を見る</button><div class="support-content" id="support-content"><p class="support-intro">必要なときだけ、ヒントを順番に見よう。</p></div><div id="feedback-area"></div></aside></div></section>`;
+    app.innerHTML = `<section class="screen"><header class="topbar"><button class="secondary quit-button" id="quit-button" type="button">中断</button><h1>${state.sessionMode === 'review' ? 'まちがいだけ復習' : '割合・数量関係'}</h1><span class="question-number">Q ${state.index + 1} / ${total}</span></header><div class="progress" aria-label="進捗"><span style="width:${state.index / total * 100}%"></span></div><div class="work-layout"><article class="problem-card"><div class="prompt part-line" id="prompt"></div><label class="answer-label" for="answer-field">${answerInstruction(question)}</label><div class="answer-row"><div class="input-wrap"><math-field id="answer-field" inputmode="latin" aria-label="${answerInstruction(question)}"></math-field></div><span class="answer-unit" id="answer-unit"></span></div><p class="helper">${helperText(question)}</p><div class="input-tools" id="input-tools" aria-label="入力補助"><button class="secondary" data-insert="\\frac{#0}{#?}">分数</button><button class="secondary" data-insert="x">x</button><button class="secondary" data-insert="y">y</button><button class="secondary" data-insert="a">a</button><button class="secondary" data-insert="b">b</button><button class="secondary" data-insert=",">,</button><button class="secondary" data-insert="<">&lt;</button><button class="secondary" data-insert="\\le">≦</button><button class="secondary" data-insert=">">&gt;</button><button class="secondary" data-insert="\\ge">≧</button></div><div class="submit-row"><button class="primary" id="submit-button" disabled>決定</button></div><p class="input-notice" id="input-notice" role="status" aria-live="polite"></p></article><aside class="support-card"><h2>ヒント・解説</h2><button class="secondary hint-button" id="hint-button">ヒント1を見る</button><div class="support-content" id="support-content"><p class="support-intro">必要なときだけ、ヒントを順番に見よう。</p></div><div id="feedback-area"></div></aside></div></section>`;
     app.querySelector('.screen').classList.add('question-screen');
+    // 前の問題のスクロールを残さない（問題文・見出し・進み具合のバーから見せる）
+    window.scrollTo(0, 0);
     if (Handwriting) Handwriting.reset(true);
     renderParts(document.getElementById('prompt'), question.promptParts);
     document.getElementById('answer-unit').textContent = question.answerSpec.unit || '';
@@ -179,17 +184,20 @@
   function bindMathField() {
     const field = document.getElementById('answer-field');
     const submit = document.getElementById('submit-button');
-    let composing = false;
-    const normalize = () => {
-      const normalized = Q.toHalfWidth(field.value || '');
-      if (normalized !== field.value) field.value = normalized;
-    };
+    // 入力欄は問題ごとに作り直すので、欄ごとに1回だけ設定する。値の書き戻し（全角→半角）はしない（採点時にそろえる）
+    // 実キーの Enter と、仮想キーボードの ↵（change）の両方で決定する。採点後は「次へ」
+    bindMathFieldSubmit(field, () => {
+      if (state.locked) { const button = document.getElementById('submit-button'); if (button) button.click(); }
+      else submitAnswer();
+    });
+    followVirtualKeyboard(() => state.locked
+      ? [document.querySelector('.submit-row'), document.querySelector('#feedback-area .feedback')]
+      : [document.querySelector('.answer-row'), document.getElementById('input-notice'), document.querySelector('.submit-row')]);
     customElements.whenDefined('math-field').then(() => {
       submit.disabled = false;
+      // 空白キーを「\:」として残し、「3 4」が 34 に化けて採点されないようにする（採点で「区切ろう」と促す）
+      try { field.mathModeSpace = '\\:'; } catch (_) {}
       field.setAttribute('inputmode', 'latin');
-      field.addEventListener('compositionstart', () => { composing = true; });
-      field.addEventListener('compositionend', () => { composing = false; normalize(); });
-      field.addEventListener('input', normalize);
       field.addEventListener('focus', () => {
         field.setAttribute('inputmode', 'latin');
         const textarea = field.shadowRoot && field.shadowRoot.querySelector('textarea');
@@ -199,22 +207,90 @@
           textarea.setAttribute('lang', 'en');
         }
       });
-      field.addEventListener('keydown', event => {
-        if (event.key !== 'Enter' || composing || event.isComposing) return;
-        event.preventDefault();
-        setTimeout(submitAnswer, 40);
-      });
+      // 仮想キーボードの ↵ は、決定（change）の約50ms後に input（insertLineBreak）を出すので、そのときは一言を消さない
+      field.addEventListener('input', event => { if (event && event.inputType === 'insertLineBreak') return; clearNotice(); });
       field.focus();
+      // キーボードが開いたままなら、入力欄と決定ボタンがキーボードの上に来るよう合わせる
+      if (followVirtualKeyboard.update) followVirtualKeyboard.update();
     }).catch(showDependencyError);
+  }
+
+  // 欄ごとに1回だけ。GraderCore.setupMathField の onEnter（実キー）と、欄にフォーカスがあるときの change（仮想キーボードの ↵）。
+  // 400ms 以内の2回目は無視する（二重採点を防ぐ）
+  function bindMathFieldSubmit(mf, onSubmit) {
+    if (!mf || mf.dataset.submitBound) return;
+    mf.dataset.submitBound = '1';
+    let last = 0;
+    const fire = () => { const now = Date.now(); if (now - last < 400) return; last = now; onSubmit(); };
+    if (window.GraderCore) window.GraderCore.setupMathField(mf, { onEnter: event => { if (!event.repeat) fire(); } });
+    mf.addEventListener('change', () => {
+      const focused = typeof mf.hasFocus === 'function' ? mf.hasFocus() : document.activeElement === mf;
+      if (focused) fire();
+    });
+  }
+
+  // 仮想キーボードが出ている間は <html> に vk-open と --vk-height を付けて高さ固定をゆるめ（style.css）、
+  // getTargets() の要素がキーボードの上に見えるようにスクロールする。閉じたら先頭へ戻す。1回だけ設定する
+  function followVirtualKeyboard(getTargets) {
+    const vk = window.mathVirtualKeyboard;
+    if (!vk || followVirtualKeyboard.bound) return;
+    followVirtualKeyboard.bound = true;
+    followVirtualKeyboard.getTargets = getTargets;
+    const update = () => {
+      const height = Math.round((vk.boundingRect && vk.boundingRect.height) || 0);
+      const open = vk.visible !== false && height > 0;
+      const root = document.documentElement;
+      const was = root.classList.contains('vk-open');
+      root.classList.toggle('vk-open', open);
+      root.style.setProperty('--vk-height', `${open ? height : 0}px`);
+      if (!open) { if (was) { if (!revealFeedbackOnNarrow()) window.scrollTo(0, 0); } return; }
+      requestAnimationFrame(() => {
+        const targets = (followVirtualKeyboard.getTargets() || []).filter(Boolean);
+        if (!targets.length) return;
+        const rects = targets.map(target => target.getBoundingClientRect());
+        const top = Math.min(...rects.map(rect => rect.top));
+        const bottom = Math.max(...rects.map(rect => rect.bottom));
+        const visibleBottom = window.innerHeight - height - 8;
+        let dy = 0;
+        if (bottom > visibleBottom) dy = bottom - visibleBottom;
+        if (top - dy < 8) dy = top - 8;
+        if (dy) window.scrollBy(0, dy);
+      });
+    };
+    vk.addEventListener('geometrychange', update);
+    vk.addEventListener('virtual-keyboard-toggle', update); // geometrychange が来ず、これだけが来ることがある
+    window.addEventListener('resize', update);
+    followVirtualKeyboard.update = update;
+  }
+
+  // 1列になる狭い画面では、判定が入力欄より下に出るので、採点後は判定の先頭まで送る。送ったら true
+  function revealFeedbackOnNarrow() {
+    if (!state.locked || !window.matchMedia('(max-width: 760px)').matches) return false;
+    const feedback = document.querySelector('#feedback-area .feedback');
+    if (!feedback) return false;
+    feedback.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    return true;
   }
 
   function insertMath(latex) {
     const field = document.getElementById('answer-field');
     if (!field || state.locked) return;
+    const options = { selectionMode: 'placeholder', focus: true };
     let inserted = false;
-    try { inserted = field.executeCommand(['insert', latex]) === true; } catch (_) {}
-    if (!inserted) { try { field.insert(latex); } catch (_) {} }
+    try { if (typeof field.insert === 'function') { field.insert(latex, options); inserted = true; } } catch (_) {}
+    if (!inserted) { try { field.executeCommand(['insert', latex, options]); } catch (_) {} }
     field.focus();
+  }
+
+  function clearNotice() {
+    const notice = document.getElementById('input-notice');
+    if (notice) notice.textContent = '';
+  }
+
+  function showNotice(message) {
+    const notice = document.getElementById('input-notice');
+    if (notice) notice.textContent = message || '答えを入力してから決定しよう。';
+    if (followVirtualKeyboard.update) followVirtualKeyboard.update();
   }
 
   function appendHint(parts, level, final) {
@@ -257,7 +333,7 @@
       dialog.remove();
       state.hintLevel = 3;
       appendHint(question.hints[2], 3, true);
-      lockAndRecord(false, 'GIVE_UP', '');
+      lockAndRecord({ status: 'wrong', kind: 'wrong', reason: 'GIVE_UP', message: '', code: 'GIVE_UP' }, 'GIVE_UP');
     });
     actions.append(continueButton, revealButton);
     card.append(actions);
@@ -270,23 +346,35 @@
   function submitAnswer() {
     if (state.locked) return;
     const field = document.getElementById('answer-field');
-    const raw = Q.toHalfWidth(field.value || '').trim();
-    if (field.value !== raw) field.value = raw;
-    const result = Q.grade(state.questions[state.index], raw);
-    lockAndRecord(result.ok, result.ok ? '' : result.code, raw);
+    const raw = String(field.value || '');
+    const result = Q.gradeAnswer(state.questions[state.index], raw);
+    // 空欄・書きかけは採点しない（消費しない・ロックしない・記録しない）
+    if (!Q.consumes(result)) { showNotice(result.message); field.focus(); return; }
+    lockAndRecord(result, raw);
   }
+
+  // 正しい答え（\dfrac）と同じ大きさで見せる
+  function displayLatex(latex) { return String(latex).replace(/\\frac(?![A-Za-z])/g, '\\dfrac'); }
 
   function safeMathInput(raw) {
     if (!raw || raw === 'GIVE_UP') return null;
-    if (/[^0-9a-zA-Z+\-*/.,<>=≤≥(){}\\\s]/.test(raw)) return null;
+    if (/[^0-9a-zA-Z+\-*/.,<>=≤≥(){}%\\\s]/.test(raw)) return null;
     const commands = raw.match(/\\[A-Za-z]+/g) || [];
-    return commands.every(command => ['\\frac', '\\dfrac', '\\left', '\\right', '\\times', '\\cdot', '\\div', '\\le', '\\leq', '\\ge', '\\geq', '\\lt', '\\gt'].includes(command)) ? raw : null;
+    return commands.every(command => ['\\frac', '\\dfrac', '\\left', '\\right', '\\times', '\\cdot', '\\div', '\\le', '\\leq', '\\ge', '\\geq', '\\lt', '\\gt', '\\leqq', '\\geqq', '\\mathrm', '\\operatorname', '\\text'].includes(command)) ? raw.replace(/(^|[^\\])%/g, '$1\\%') : null;
   }
 
   function appendUserAnswer(container, raw) {
     if (!raw || raw === 'GIVE_UP') { container.append(document.createTextNode(raw === 'GIVE_UP' ? 'ヒント3を使用' : '未入力')); return; }
+    // 末尾の単位（\text{時間}・円 など）は数式から外して文字で添える（生の LaTeX を出さない）
+    const unitMatch = String(raw).match(/^([\s\S]*?)\s*(?:\\text\s*\{([^{}]*)\}|([\u3040-\u30FF\u3400-\u9FFF々]+))\s*$/);
+    if (unitMatch && unitMatch[1] && safeMathInput(unitMatch[1])) {
+      const span = element('span', 'part-line');
+      renderParts(span, [ { type: 'math', value: displayLatex(safeMathInput(unitMatch[1])) }, { type: 'text', value: ` ${unitMatch[2] || unitMatch[3]}` } ]);
+      container.append(span);
+      return;
+    }
     const safe = safeMathInput(raw);
-    if (safe) renderParts(container, [ { type: 'math', value: safe } ]);
+    if (safe) { const span = element('span', 'part-line'); renderParts(span, [ { type: 'math', value: displayLatex(safe) } ]); container.append(span); }
     else container.append(element('code', '', raw.slice(0, 120)));
   }
 
@@ -305,33 +393,66 @@
     return points[code] || '条件と求める量の対応を、もう1度確認しよう。';
   }
 
-  function lockAndRecord(ok, code, raw) {
+  function wrongCode(question) {
+    const codes = { number: 'QTY-BASE', integerPair: 'QTY-UNIT', naturalSet: 'QTY-NATURAL', linearExpression: 'QTY-RELATION', monomialExpression: 'QTY-RELATION', inequality: 'QTY-INEQ' };
+    return codes[question.answerSpec.kind] || '';
+  }
+
+  function feedbackStyle(result) {
+    if (result.status === 'correct') return { className: '', title: '○ 正解', short: '○ 正解' };
+    if (result.status === 'negDenominator') return { className: ' is-neg', title: '△ 書き直そう（正解には数えません）', short: '△ 書き直そう' };
+    if (result.status === 'notReduced' && result.kind === 'unfinished') return { className: ' is-unfinished', title: '× 不正解（あと一歩）', short: '× 不正解（あと一歩）' };
+    if (result.status === 'notReduced') return { className: ' is-notation', title: '× 不正解（書き方）', short: '× 不正解（書き方）' };
+    return { className: ' is-wrong', title: '× 不正解', short: '× 不正解' };
+  }
+
+  function lockAndRecord(result, raw) {
     if (state.locked) return;
     state.locked = true;
+    state.lockedAt = Date.now();
+    clearNotice();
     const question = state.questions[state.index];
+    const ok = result.status === 'correct';
+    const code = result.code === 'GIVE_UP' ? 'GIVE_UP' : ok ? '' : wrongCode(question);
     const recordedRaw = code === 'GIVE_UP' ? 'GIVE_UP' : raw;
-    state.answers.push({ question, ok, code, raw: recordedRaw });
+    state.answers.push({ question, ok, code, raw: recordedRaw, status: result.status, kind: result.kind, message: result.status === 'wrong' ? '' : result.message || '' });
     const field = document.getElementById('answer-field');
     field.setAttribute('readonly', '');
     const submit = document.getElementById('submit-button');
     submit.disabled = false;
     submit.textContent = state.index + 1 === state.questions.length ? '結果を見る' : '次へ';
-    submit.addEventListener('click', nextQuestion, { once: true });
+    submit.removeEventListener('click', submitAnswer);
+    // 採点から 500ms は「次へ」を受け付けない（Enter のすばやい2回押しで判定を見ないまま進まないように）
+    const onNext = () => {
+      if (Date.now() - state.lockedAt < NEXT_GUARD_MS) return;
+      submit.removeEventListener('click', onNext);
+      nextQuestion();
+    };
+    submit.addEventListener('click', onNext);
     document.getElementById('hint-button').disabled = true;
     document.querySelectorAll('[data-insert]').forEach(button => { button.disabled = true; });
 
     const area = document.getElementById('feedback-area');
-    const feedback = element('section', `feedback${ok ? '' : ' is-wrong'}`);
-    feedback.append(element('h3', '', ok ? '正解！' : '確認しよう'));
+    const style = feedbackStyle(result);
+    const feedback = element('section', `feedback${style.className}`);
+    feedback.append(element('h3', '', style.title));
     if (!ok) {
+      if (result.message) feedback.append(element('p', 'feedback-message', result.message));
       const yours = element('p'); yours.append(document.createTextNode('あなたの答え：')); appendUserAnswer(yours, recordedRaw); feedback.append(yours);
       const correct = element('p'); correct.append(document.createTextNode('正しい答え：')); const answer = element('span', 'part-line'); renderParts(answer, question.answerSpec.displayParts); correct.append(answer); feedback.append(correct);
-      feedback.append(element('p', '', `確認ポイント：${feedbackPoint(code)}`));
+      if (result.status === 'wrong') feedback.append(element('p', '', `確認ポイント：${feedbackPoint(code)}`));
       const solution = element('div', 'part-line'); renderParts(solution, question.workedSolution); feedback.append(solution);
     } else feedback.append(element('p', '', 'その調子。次の問題へ進みましょう。'));
     area.append(feedback);
-    typeset(area);
+    const wasTyping = document.activeElement === field;
+    typeset(area).then(() => {
+      if (followVirtualKeyboard.update && document.documentElement.classList.contains('vk-open')) followVirtualKeyboard.update();
+      else revealFeedbackOnNarrow();
+    });
+    if (wasTyping) submit.focus({ preventScroll: true });
   }
+
+  const NEXT_GUARD_MS = 500;
 
   function nextQuestion() {
     state.index += 1;
@@ -358,7 +479,9 @@
     const list = document.getElementById('result-list');
     state.answers.forEach((answer, index) => {
       const item = element('div', 'result-item');
-      item.append(element('span', `result-mark ${answer.ok ? 'ok' : 'ng'}`, `Q${index + 1} ${answer.ok ? '○' : '×'}`));
+      const style = feedbackStyle({ status: answer.status || (answer.ok ? 'correct' : 'wrong'), kind: answer.kind });
+      item.append(element('span', `result-mark ${answer.ok ? 'ok' : 'ng'}${style.className}`, `Q${index + 1} ${style.short}`));
+      if (answer.message) item.append(element('div', `result-judge${style.className}`, answer.message));
       const yours = element('div'); yours.append(document.createTextNode('自分の答え：')); appendUserAnswer(yours, answer.raw); item.append(yours);
       const correct = element('div'); correct.append(document.createTextNode('正答：')); const answerView = element('span', 'part-line'); renderParts(answerView, answer.question.answerSpec.displayParts); correct.append(answerView); item.append(correct);
       list.append(item);

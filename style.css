@@ -112,6 +112,15 @@ math-field::part(menu-toggle), math-field::part(virtual-keyboard-toggle) { displ
 .feedback.is-wrong { border-color: #e7b7b1; background: var(--danger-soft); }
 .feedback h3 { margin: 0 0 7px; color: var(--success); font-size: 1rem; }
 .feedback.is-wrong h3 { color: var(--danger); }
+.feedback.is-unfinished { border-color: #eec27a; background: #fff7e8; }
+.feedback.is-unfinished h3 { color: #a14a00; }
+.feedback.is-notation { border-color: #c7b6ec; background: #f5f0ff; }
+.feedback.is-notation h3 { color: #5b2fa6; }
+.feedback.is-neg { border-color: #e2cf7c; background: #fffbe6; }
+.feedback.is-neg h3 { color: #6f5800; }
+.feedback .feedback-message { font-weight: 700; }
+.feedback { scroll-margin-top: 12px; }
+.input-notice { min-height: 1.4em; margin: 6px 0 0; color: #8a4b00; font-size: .9rem; font-weight: 700; text-align: right; }
 .feedback p { margin: 5px 0; }
 .next-button { width: 100%; margin-top: 12px; }
 
@@ -124,6 +133,14 @@ math-field::part(menu-toggle), math-field::part(virtual-keyboard-toggle) { displ
 .result-mark { display: inline-block; min-width: 58px; font-weight: 800; }
 .result-mark.ok { color: var(--success); }
 .result-mark.ng { color: var(--danger); }
+.result-mark.is-unfinished { color: #a14a00; }
+.result-mark.is-notation { color: #5b2fa6; }
+.result-mark.is-neg { color: #6f5800; }
+.result-mark.ok, .result-mark.ng { min-width: 0; margin-right: 10px; }
+.result-judge { font-size: .9rem; font-weight: 700; text-align: left; }
+.result-judge.is-unfinished { color: #a14a00; }
+.result-judge.is-notation { color: #5b2fa6; }
+.result-judge.is-neg { color: #6f5800; }
 .result-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
 .result-actions button { flex: 1; min-width: 145px; padding: 14px 18px; font-size: 1.05rem; }
 .dependency-error { margin: auto; max-width: 640px; padding: 26px; text-align: center; background: #fff; border: 1px solid var(--line); border-radius: 18px; }
@@ -237,3 +254,10 @@ math-field::part(menu-toggle), math-field::part(virtual-keyboard-toggle) { displ
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* 仮想キーボードが出ている間（<html class="vk-open">。main.js の followVirtualKeyboard が付ける）：高さ固定をゆるめてスクロールできるようにする */
+html.vk-open, html.vk-open body { height: auto; min-height: 100%; overflow: auto; }
+html.vk-open body { padding-bottom: var(--vk-height, 0px); }
+html.vk-open .screen { height: auto; min-height: 100dvh; overflow: visible; }
+html.vk-open .work-layout { flex: none; }
+html.vk-open .problem-card { overflow: visible; }

@@ -306,7 +306,7 @@
   function toHalfWidth(value) {
     return String(value || '')
       .replace(/[０-９Ａ-Ｚａ-ｚ]/g, character => String.fromCharCode(character.charCodeAt(0) - 0xFEE0))
-      .replace(/[＋]/g, '+').replace(/[－ー−]/g, '-')
+      .replace(/[＋]/g, '+').replace(/[％]/g, '%').replace(/[－ー−]/g, '-')
       .replace(/[＊×・]/g, '*').replace(/[÷／]/g, '/')
       .replace(/[＝]/g, '=').replace(/[（]/g, '(').replace(/[）]/g, ')')
       .replace(/[．]/g, '.').replace(/[，、]/g, ',')
@@ -614,63 +614,726 @@
     return expected.every((value, index) => equalRat(actual[index], mulRat(value, ratio)));
   }
 
-  function numericValue(value) {
-    const parsed = parseLinear(value, []);
-    if (hasVariables(parsed)) throw new Error('NOT_NUMBER');
-    return parsed.constant;
+  /* ===== 採点（2026-10-23 判定の方針に合わせて作り直し） =====
+   * gradeAnswer(question, raw) は DOM に触らず { status, kind, reason, message, flags } を返す。
+   *   status: correct / notReduced（kind: unfinished＝途中 か notation＝書き方）/ negDenominator / wrong / unreadable / empty
+   *   empty・unreadable は採点しない（消費しない・記録しない）。
+   * 値は BigInt の有理数で厳密に比べる（許容誤差なし）。値が合ったときだけ、書き方・途中を点検する。
+   * 空欄の判定と全角・記号のゆれのそろえ方は GraderCore（grader-core.js）を使う。 */
+  function graderCore() {
+    if (typeof GraderCore !== 'undefined') return GraderCore; // eslint-disable-line no-undef
+    if (typeof require === 'function') return require('./grader-core.js');
+    throw new Error('grader-core.js が読み込まれていません');
   }
 
-  function grade(question, input) {
-    const spec = question.answerSpec;
-    const raw = toHalfWidth(input).trim();
-    if (!raw) return { ok: false, code: 'INCOMPLETE_ANSWER' };
-    try {
-      if (spec.kind === 'number') {
-        if (spec.decimals !== null && !new RegExp(`^[+-]?\\d+\\.\\d{${spec.decimals}}$`).test(raw.replace(/\s+/g, ''))) {
-          return { ok: false, code: 'UNIT_FORMAT' };
-        }
-        return { ok: equalRat(numericValue(raw), ratFromDecimal(String(spec.canonicalValue))), code: 'QTY-BASE' };
-      }
-      if (spec.kind === 'integerPair') {
-        const chunks = raw.split(',');
-        if (chunks.length !== 2) return { ok: false, code: 'INCOMPLETE_ANSWER' };
-        const values = chunks.map(value => numericValue(value));
-        const ok = values.every(isIntegerRat) && values.every((value, index) => equalRat(value, ratFromDecimal(String(spec.canonicalValue[index]))));
-        return { ok, code: ok ? '' : 'QTY-UNIT' };
-      }
-      if (spec.kind === 'naturalSet') {
-        const chunks = raw.split(',');
-        if (chunks.some(value => !value.trim())) return { ok: false, code: 'QTY-NATURAL' };
-        const values = chunks.map(value => numericValue(value));
-        if (!values.length || values.some(value => !isIntegerRat(value) || signRat(value) < 1)) return { ok: false, code: 'QTY-NATURAL' };
-        const unique = [...new Map(values.map(value => [`${value.n}/${value.d}`, value])).values()].sort((a, b) => a.n < b.n ? -1 : a.n > b.n ? 1 : 0);
-        const ok = unique.length === values.length && unique.length === spec.canonicalValue.length && unique.every((value, index) => equalRat(value, ratFromDecimal(String(spec.canonicalValue[index]))));
-        return { ok, code: ok ? '' : 'QTY-NATURAL' };
-      }
-      if (spec.kind === 'linearExpression') {
-        const expected = parseLinear(spec.canonicalValue, spec.allowedVariables);
-        const parsed = parseLinear(raw, spec.allowedVariables);
-        const collected = !spec.formPolicy.requireCollectedTerms || isCollectedLinearForm(raw, expected, spec.allowedVariables);
-        const ok = collected && !hasExplicitZeroTerm(raw) && sameLinear(parsed, expected);
-        return { ok, code: ok ? '' : 'QTY-RELATION' };
-      }
-      if (spec.kind === 'monomialExpression') {
-        const ok = sameMonomial(parseMonomial(raw, spec.allowedVariables), parseMonomial(spec.canonicalValue, spec.allowedVariables));
-        return { ok, code: ok ? '' : 'QTY-RELATION' };
-      }
-      if (spec.kind === 'inequality') {
-        const ok = sameInequality(parseInequality(raw, spec.allowedVariables), parseInequality(spec.canonicalValue, spec.allowedVariables));
-        return { ok, code: ok ? '' : 'QTY-INEQ' };
-      }
-      if (spec.kind === 'term') {
-        const normalized = raw.replace(/\s+/g, '').toLowerCase();
-        const accepted = [spec.canonicalValue].concat(spec.acceptedAliases || []).map(value => String(value).replace(/\s+/g, '').toLowerCase());
-        return { ok: accepted.includes(normalized), code: 'TYPE_MISIDENTIFICATION' };
-      }
-      return { ok: false, code: 'UNCLASSIFIED' };
-    } catch (error) {
-      return { ok: false, code: error.message === 'INPUT_TOO_LONG' || error.message === 'TOO_COMPLEX' ? 'FORM_ERROR' : 'UNCLASSIFIED' };
+  const STATUS = { CORRECT: 'correct', NOT_REDUCED: 'notReduced', NEG_DEN: 'negDenominator', WRONG: 'wrong', UNREADABLE: 'unreadable', EMPTY: 'empty' };
+  const UNFINISHED = ['DOUBLE_NEGATIVE', 'NOT_EXPANDED', 'NOT_COLLECTED', 'UNEVALUATED_CONSTANT', 'FRACTION_NESTED', 'FRACTION_NOT_REDUCED', 'VAR_REPEATED'];
+  const NOTATION = ['DOUBLE_SIGN', 'MIXED_NUMBER', 'LEADING_DOT', 'LEADING_ZERO', 'NOTATION_DIV', 'NOTATION_TIMES', 'NOTATION_ORDER', 'NOTATION_ONE', 'ZERO_COEFFICIENT_TERM', 'DUPLICATE_SOLUTION', 'DECIMAL_PLACES'];
+  const MESSAGES = {
+    DOUBLE_NEGATIVE: 'あと一歩：符号を整理しよう',
+    NOT_EXPANDED: 'あと一歩：かっこをはずして整理しよう',
+    NOT_COLLECTED: 'あと一歩：同じ文字の項・数の項をまとめよう',
+    NOT_COLLECTED_NUMBER: 'あと一歩：計算を最後までしよう',
+    UNEVALUATED_CONSTANT: 'あと一歩：数どうしの計算を最後までしよう',
+    FRACTION_NESTED: 'あと一歩：分数の中の小数や分数をなくそう',
+    FRACTION_NOT_REDUCED: 'あと一歩：約分しよう',
+    VAR_REPEATED: 'あと一歩：同じ文字の積や商を整理しよう',
+    DOUBLE_SIGN: '書き方：＋と－を続けて書かないよ。符号を1つにしよう',
+    MIXED_NUMBER: '書き方：帯分数は使わずに書こう',
+    LEADING_DOT: '書き方：.5 ではなく 0.5 のように書こう',
+    LEADING_ZERO: '書き方：数の先頭に 0 を付けないよ',
+    NOTATION_DIV: '書き方：わり算の記号 ÷ は使わずに、分数の形で書こう',
+    NOTATION_TIMES: '書き方：かけ算の記号 × は省いて書こう',
+    NOTATION_ORDER: '書き方：数は文字の前に、文字はアルファベット順に書こう',
+    NOTATION_ONE: '書き方：係数の 1 は書かないよ',
+    ZERO_COEFFICIENT_TERM: '書き方：0 の項は書かないよ',
+    DUPLICATE_SOLUTION: '書き方：同じ数は1回だけ書こう',
+    DECIMAL_PLACES: '書き方：指定された小数の位までちょうど書こう',
+    NEGATIVE_DENOMINATOR: '値は合っています。マイナスは分子か分数の前に書こう',
+    unit: '単位や数を確かめよう',
+    badVariable: '問題で使う文字だけで表そう',
+    NOT_ROUNDED: '小数第2位を四捨五入しよう',
+    relation: '不等号の向きと、等号をふくむかどうかを確かめよう',
+    NO_RELATION: '不等号を使って表そう',
+    count: '答えの数（個数）を確かめよう',
+    empty: '答えを入力してから決定しよう',
+    INCOMPLETE: '書きかけのところがあるよ。最後まで書いてから決定しよう',
+    SPACED_DIGITS: '数と数の間はカンマ（,）で区切ろう',
+    EQUALS: '答えだけを書こう（= は使わないよ）',
+    SEPARATOR: '答えは1つだけ書こう',
+    SYNTAX: '式（数）として読み取れませんでした。入力を見直そう',
+    INEQ_ONLY: '不等式だけを書こう（言葉や単位は付けないよ）',
+    ANSWER_ONLY: '答えだけを書こう（「です」などは付けないよ）',
+    UNIT_ONCE: '単位は最後に1回だけ書こう',
+    PAIR_SPLIT: '分と秒に分けて、「分,秒」の順に書こう'
+  };
+
+  function ReadErr(reason) { this.reason = reason; }
+  function SemErr(reason) { this.reason = reason; }
+
+  function makeResult(status, reason, extra) {
+    let kind = 'wrong';
+    if (status === STATUS.CORRECT) kind = 'correct';
+    else if (status === STATUS.NEG_DEN) kind = 'negDenominator';
+    else if (status === STATUS.EMPTY || status === STATUS.UNREADABLE) kind = 'incomplete';
+    else if (status === STATUS.NOT_REDUCED) kind = UNFINISHED.includes(reason) ? 'unfinished' : 'notation';
+    const result = { status, kind, reason: reason || '', message: '' };
+    if (extra) Object.assign(result, extra);
+    if (!result.message) result.message = MESSAGES[result.messageKey || reason] || (status === STATUS.UNREADABLE ? MESSAGES.SYNTAX : '');
+    return result;
+  }
+
+  /* ---- 入力の下ごしらえ ---- */
+  const TIMES_RE = /\\times(?![A-Za-z])|\\cdot(?![A-Za-z])|\\ast(?![A-Za-z])|[×＊*·⋅・]/;
+  const DIV_RE = /\\div(?![A-Za-z])|÷/;
+  const TRAILING_WORD_RE = /(?:\\text\s*\{[^{}]*\}|\\mathrm\s*\{[^{}]*\}|[぀-ヿ㐀-鿿々]+)\s*$/;
+
+  function unitVariants(units) {
+    const out = [];
+    for (const unit of units || []) {
+      const u = toHalfWidth(unit);
+      out.push(`\\text{${u}}`, `\\mathrm{${u}}`, `\\operatorname{${u}}`, `\\ ${u}`, u);
     }
+    return out.sort((a, b) => b.length - a.length);
+  }
+
+  // 末尾の単位を外す。許した単位なら { s }、ほかの単位らしい語が付いていれば { s, otherUnit:true }
+  function stripUnit(source, units) {
+    const s = source.replace(/\s+$/, '');
+    for (const candidate of unitVariants(units)) {
+      if (s.length > candidate.length && s.slice(-candidate.length) === candidate) return { s: s.slice(0, -candidate.length) };
+    }
+    const match = s.match(TRAILING_WORD_RE);
+    if (match && match.index > 0) {
+      // ひらがなを含む（「です」「ではない」など）のは単位ではなく文。採点せず答えだけを書いてもらう
+      return { s: s.slice(0, match.index), otherUnit: true, sentence: /[\u3040-\u309F]/.test(match[0]) };
+    }
+    return { s };
+  }
+
+  // raw → { s, times, div, otherUnit } または { result }（空欄・読めない）
+  function prepare(raw, units) {
+    const GC = graderCore();
+    const text = raw == null ? '' : String(raw);
+    if (GC.isBlank(text)) return { result: makeResult(STATUS.EMPTY, 'empty') };
+    if (GC.hasEmptySlot(text)) return { result: makeResult(STATUS.UNREADABLE, 'INCOMPLETE') };
+    if (text.length > 240) return { result: makeResult(STATUS.UNREADABLE, 'TOO_LONG') };
+    const times = TIMES_RE.test(text);
+    const div = DIV_RE.test(text);
+    const half = toHalfWidth(text).replace(/\\%/g, '%').replace(/\{,\}/g, ',')
+      .replace(/\\(d?frac)\s+([A-Za-z0-9])/g, '\\$1{$2}') // \frac x2（TeX の省略形）
+      // MathLive がキー入力の cm・kg を \operatorname{\mathrm{cm}} にするので、英字の単位はほどく
+      .replace(/\\operatorname\s*\{\s*\\mathrm\s*\{([A-Za-z]*)\}\s*\}/g, '$1')
+      .replace(/\\(?:operatorname|mathrm|text)\s*\{([A-Za-z%]*)\}/g, '$1');
+    const stripped = stripUnit(half, units);
+    if (stripped.sentence) return { result: makeResult(STATUS.UNREADABLE, 'ANSWER_ONLY') };
+    const japaneseUnits = (units || []).map(toHalfWidth).filter(u => /[^\x00-\x7F]/.test(u));
+    if (japaneseUnits.some(u => stripped.s.includes(u))) return { result: makeResult(STATUS.UNREADABLE, 'UNIT_ONCE') };
+    const normalized = GC.normalize(stripped.s);
+    if (normalized.empty) return { result: makeResult(STATUS.UNREADABLE, 'INCOMPLETE') };
+    if (normalized.error) {
+      const reason = normalized.error === 'spacedDigits' ? 'SPACED_DIGITS' : normalized.error === 'emptySlot' ? 'INCOMPLETE' : 'SYNTAX';
+      return { result: makeResult(STATUS.UNREADABLE, reason) };
+    }
+    return { s: normalized.s, times, div, otherUnit: !!stripped.otherUnit, trailing: !!stripped.otherUnit };
+  }
+
+  /* ---- 構文木 ---- */
+  function parseTree(src, vars) {
+    let pos = 0;
+    let depth = 0;
+    const flags = new Set();
+    const peek = () => src.charAt(pos);
+    const isFracAt = () => src.substr(pos, 5) === '\\frac' && !/[A-Za-z]/.test(src.charAt(pos + 5));
+    function enter() { depth += 1; if (depth > 10) throw new ReadErr('SYNTAX'); }
+    function numNode(textValue) {
+      if (textValue.replace('.', '').length > 15) throw new ReadErr('SYNTAX');
+      const [whole, decimal = ''] = textValue.split('.');
+      const value = rat(BigInt(`${whole || '0'}${decimal}` || '0'), 10n ** BigInt(decimal.length));
+      if (/^\./.test(textValue)) flags.add('LEADING_DOT');
+      if (/^0\d/.test(textValue)) flags.add('LEADING_ZERO');
+      return { t: 'num', text: textValue, isInt: !textValue.includes('.'), v: value };
+    }
+    function varNode(name) {
+      if (vars && !vars.includes(name)) throw new SemErr('badVariable');
+      return { t: 'var', name };
+    }
+    function startsFactor() {
+      const ch = peek();
+      return ch === '(' || ch === '[' || ch === '{' || isFracAt() || /[a-z0-9.]/.test(ch);
+    }
+    function expr() {
+      let node = term();
+      while (peek() === '+' || peek() === '-') {
+        const op = src.charAt(pos); pos += 1;
+        if (pos >= src.length) throw new ReadErr('INCOMPLETE');
+        node = { t: op === '+' ? 'add' : 'sub', a: node, b: term() };
+      }
+      return node;
+    }
+    function term() {
+      let node = unary();
+      for (;;) {
+        const ch = peek();
+        if (ch === '*' || ch === '/') {
+          pos += 1;
+          if (pos >= src.length) throw new ReadErr('INCOMPLETE');
+          node = { t: ch === '*' ? 'mul' : 'div', a: node, b: unary() };
+          continue;
+        }
+        if (!startsFactor()) return node;
+        const right = power();
+        if (node.t === 'num' && right.t === 'frac' && isNumeric(right)) {
+          node = { t: 'mixed', whole: node, frac: right };
+          flags.add('MIXED_NUMBER');
+          continue;
+        }
+        node = { t: 'mul', a: node, b: right, implicit: true };
+      }
+    }
+    function unary() {
+      const ch = peek();
+      if (ch === '+' || ch === '-') {
+        pos += 1;
+        if (pos >= src.length) throw new ReadErr('INCOMPLETE');
+        if (peek() === '+' || peek() === '-') flags.add('DOUBLE_SIGN');
+        return { t: ch === '-' ? 'neg' : 'pos', x: unary() };
+      }
+      return power();
+    }
+    function power() {
+      const base = atom();
+      if (peek() !== '^') return base;
+      pos += 1;
+      let exponent;
+      if (peek() === '{') exponent = group('{', '}');
+      else if (/[0-9]/.test(peek())) { exponent = numNode(src.charAt(pos)); pos += 1; }
+      else throw new ReadErr(pos >= src.length ? 'INCOMPLETE' : 'SYNTAX');
+      return { t: 'pow', a: base, e: exponent };
+    }
+    function group(open, close) {
+      pos += 1; enter();
+      if (peek() === close) throw new ReadErr('INCOMPLETE');
+      const inner = expr();
+      if (src.charAt(pos) !== close) throw new ReadErr(pos >= src.length ? 'INCOMPLETE' : 'SYNTAX');
+      pos += 1; depth -= 1;
+      return { t: 'paren', x: inner, brace: open === '{' };
+    }
+    function fracArg() {
+      if (peek() === '{') return group('{', '}');
+      const ch = peek();
+      if (/[0-9]/.test(ch)) { pos += 1; return numNode(ch); }
+      if (/[a-z]/.test(ch)) { pos += 1; return varNode(ch); }
+      throw new ReadErr(pos >= src.length ? 'INCOMPLETE' : 'SYNTAX');
+    }
+    function atom() {
+      const ch = peek();
+      if (ch === '(') return group('(', ')');
+      if (ch === '[') return group('[', ']');
+      if (ch === '{') return group('{', '}');
+      if (isFracAt()) {
+        pos += 5; enter();
+        const num = fracArg();
+        const den = fracArg();
+        depth -= 1;
+        return { t: 'frac', num, den };
+      }
+      const rest = src.slice(pos);
+      if (/^\d+\.(?!\d)/.test(rest)) throw new ReadErr('INCOMPLETE'); // 「5.」
+      const match = rest.match(/^(?:\d+(?:\.\d+)?|\.\d+)/);
+      if (match) { pos += match[0].length; return numNode(match[0]); }
+      if (/[a-z]/.test(ch)) { pos += 1; return varNode(ch); }
+      throw new ReadErr(ch ? 'SYNTAX' : 'INCOMPLETE');
+    }
+    if (src === '') throw new ReadErr('INCOMPLETE');
+    const tree = expr();
+    if (pos !== src.length) throw new ReadErr('SYNTAX');
+    return { tree, flags };
+  }
+
+  function isNumeric(node) {
+    if (!node) return true;
+    if (node.t === 'var') return false;
+    return [node.x, node.a, node.b, node.num, node.den, node.e, node.whole, node.frac].every(child => child === undefined || isNumeric(child));
+  }
+
+  /* ---- 値（文字の累乗の積を単位にした多項式。分母は単項式だけ） ---- */
+  function polyConst(value) { return isZeroRat(value) ? new Map() : new Map([['', value]]); }
+  function keyOf(powers) {
+    return Object.keys(powers).filter(name => powers[name] !== 0).sort().map(name => `${name}^${powers[name]}`).join('*');
+  }
+  function powersOf(key) {
+    const powers = {};
+    if (!key) return powers;
+    for (const part of key.split('*')) { const [name, power] = part.split('^'); powers[name] = Number(power); }
+    return powers;
+  }
+  function polyAdd(left, right, sign) {
+    const out = new Map(left);
+    for (const [key, value] of right) {
+      const sum = addRat(out.get(key) || RAT_ZERO, sign < 0 ? negRat(value) : value);
+      if (isZeroRat(sum)) out.delete(key); else out.set(key, sum);
+    }
+    return out;
+  }
+  function polyMul(left, right) {
+    let out = new Map();
+    for (const [leftKey, leftValue] of left) {
+      for (const [rightKey, rightValue] of right) {
+        const powers = powersOf(leftKey);
+        for (const [name, power] of Object.entries(powersOf(rightKey))) powers[name] = (powers[name] || 0) + power;
+        out = polyAdd(out, new Map([[keyOf(powers), mulRat(leftValue, rightValue)]]), 1);
+      }
+    }
+    if (out.size > 60) throw new ReadErr('SYNTAX');
+    return out;
+  }
+  function polyDiv(left, right) {
+    if (right.size === 0) throw new ReadErr('DIV_ZERO');
+    if (right.size !== 1) throw new SemErr('value'); // 多項式でわる形は、この単元の答えにならない
+    const [[key, value]] = [...right];
+    const powers = powersOf(key);
+    for (const name of Object.keys(powers)) powers[name] = -powers[name];
+    return polyMul(left, new Map([[keyOf(powers), divRat(RAT_ONE, value)]]));
+  }
+  function polyEqual(left, right) {
+    if (left.size !== right.size) return false;
+    for (const [key, value] of left) if (!right.has(key) || !equalRat(right.get(key), value)) return false;
+    return true;
+  }
+  function evaluate(node) {
+    switch (node.t) {
+      case 'num': return polyConst(node.v);
+      case 'var': return new Map([[`${node.name}^1`, RAT_ONE]]);
+      case 'paren': case 'pos': return evaluate(node.x);
+      case 'neg': return polyMul(evaluate(node.x), polyConst(negRat(RAT_ONE)));
+      case 'add': return polyAdd(evaluate(node.a), evaluate(node.b), 1);
+      case 'sub': return polyAdd(evaluate(node.a), evaluate(node.b), -1);
+      case 'mul': return polyMul(evaluate(node.a), evaluate(node.b));
+      case 'div': return polyDiv(evaluate(node.a), evaluate(node.b));
+      case 'frac': return polyDiv(evaluate(node.num), evaluate(node.den));
+      case 'mixed': return polyAdd(evaluate(node.whole), evaluate(node.frac), 1);
+      case 'pow': {
+        const exponent = evaluate(node.e);
+        const e = exponent.size === 0 ? RAT_ZERO : exponent.get('');
+        if (!e || exponent.size > 1 || !isIntegerRat(e) || e.n < 0n || e.n > 9n) throw new SemErr('value');
+        let out = polyConst(RAT_ONE);
+        for (let i = 0n; i < e.n; i += 1n) out = polyMul(out, evaluate(node.a));
+        return out;
+      }
+      default: throw new ReadErr('SYNTAX');
+    }
+  }
+
+  /* ---- 書き方・途中の点検（値が合ったときだけ） ---- */
+  function stripParens(node) { let n = node; while (n.t === 'paren') n = n.x; return n; }
+  function stripSigns(node) {
+    let n = node; let negatives = 0;
+    for (;;) {
+      if (n.t === 'neg') { negatives += 1; n = n.x; } else if (n.t === 'pos') n = n.x; else if (n.t === 'paren' && stripParens(n).t !== 'add' && stripParens(n).t !== 'sub') n = n.x; else break;
+    }
+    return { negatives, core: n };
+  }
+  // 先頭の因数に付いた負号の数（-2y は mul(neg 2, y) と読むので、かけ算の左端までたどる）
+  function leadingNegatives(node) {
+    const n = stripParens(node);
+    if (n.t === 'neg') return 1 + leadingNegatives(n.x);
+    if (n.t === 'pos') return leadingNegatives(n.x);
+    if (n.t === 'mul') return leadingNegatives(n.a);
+    return 0;
+  }
+
+  // 一番外側の項に分ける（式全体を囲むかっこは許す。項の中のかっこ付きの和は「かっこが残っている」）
+  function topTerms(node, out, flags) {
+    const n = node.t === 'paren' ? stripParens(node) : node;
+    if (n.t === 'add' || n.t === 'sub') {
+      topTerms(n.a, out, flags);
+      const b = n.b;
+      if (b.t === 'paren') {
+        const inner = stripParens(b);
+        if (inner.t === 'add' || inner.t === 'sub') flags.add('NOT_EXPANDED');
+        else if (inner.t === 'pos' || leadingNegatives(inner) > 0) flags.add('DOUBLE_SIGN'); // 60a+(-50b)
+      }
+      out.push(b);
+      return out;
+    }
+    out.push(n);
+    return out;
+  }
+
+  // 1つの項を、かけ算の並び（数・文字・それ以外）と分子・分母の数・文字に分けて点検する
+  function inspectTerm(termNode, flags) {
+    const numerator = { nums: [], vars: [] };
+    const denominator = { nums: [], vars: [] };
+    let negatives = 0;
+    let fracDepth = 0;
+    let looseOne = false; // 分数の外の、かけ算の中の係数 1（1a、1\frac{x}{2}）
+    function addFactor(node, inDen, chain) {
+      const box = inDen ? denominator : numerator;
+      const signs = stripSigns(node);
+      negatives += signs.negatives;
+      const n = signs.core;
+      if (n.t === 'paren') { flags.add('NOT_EXPANDED'); chain.push('other'); return; }
+      if (n.t === 'num') {
+        box.nums.push(n); chain.push('num');
+        if (fracDepth === 0 && n.text === '1') looseOne = true;
+        return;
+      }
+      if (n.t === 'mixed') { box.nums.push({ t: 'num', isInt: false, v: RAT_ONE, mixed: true }); chain.push('num'); return; }
+      if (n.t === 'var') { box.vars.push(n.name); chain.push(`var:${n.name}`); return; }
+      if (n.t === 'pow') {
+        const base = stripParens(n.a);
+        if (base.t === 'var') { box.vars.push(base.name); chain.push(`var:${base.name}`); return; }
+        flags.add('UNEVALUATED_CONSTANT'); chain.push(base.t === 'num' ? 'num' : 'other'); return;
+      }
+      if (n.t === 'mul') { walkChain(n.a, inDen, chain); walkChain(n.b, inDen, chain); return; }
+      if (n.t === 'div' || n.t === 'frac') {
+        const top = n.t === 'frac' ? n.num : n.a;
+        const bottom = n.t === 'frac' ? n.den : n.b;
+        if (inDen) flags.add('FRACTION_NESTED');
+        const topSigns = leadingNegatives(top);
+        const bottomSigns = leadingNegatives(bottom);
+        if (topSigns > 0 && bottomSigns > 0) flags.add('DOUBLE_NEGATIVE');
+        else if (bottomSigns > 0) flags.add('NEG_DEN');
+        // 分数の中は分子・分母それぞれ別の並びとして見る。分数ごと「数」か「文字」かを外の並びへ伝える
+        const innerChain = [];
+        fracDepth += 1;
+        walkChain(top, inDen, innerChain);
+        walkChain(bottom, !inDen, []);
+        fracDepth -= 1;
+        chain.push(innerChain[0] === 'num' ? 'num' : 'other');
+        return;
+      }
+      chain.push('other');
+    }
+    function walkChain(node, inDen, chain) {
+      const n = stripSigns(node);
+      if (n.core.t === 'mul') {
+        negatives += n.negatives;
+        const sub = [];
+        walkChain(n.core.a, inDen, sub);
+        walkChain(n.core.b, inDen, sub);
+        checkOrder(sub);
+        chain.push(...sub);
+        return;
+      }
+      addFactor(node, inDen, chain);
+    }
+    function checkOrder(chain) {
+      let seenNonNumber = false;
+      let lastVar = '';
+      for (const item of chain) {
+        if (item === 'num') { if (seenNonNumber) flags.add('NOTATION_ORDER'); }
+        else {
+          seenNonNumber = true;
+          if (item.startsWith('var:')) {
+            const name = item.slice(4);
+            if (lastVar && name < lastVar) flags.add('NOTATION_ORDER');
+            lastVar = name;
+          }
+        }
+      }
+    }
+    const chain = [];
+    walkChain(termNode, false, chain);
+    checkOrder(chain);
+    if (looseOne && chain.length > 1) flags.add('NOTATION_ONE');
+    if (negatives >= 2) flags.add('DOUBLE_SIGN');
+
+    if (numerator.nums.length > 1 || denominator.nums.length > 1) flags.add('UNEVALUATED_CONSTANT');
+    const p = numerator.nums[0];
+    const q = denominator.nums[0];
+    if (q) {
+      if (!q.isInt || (p && !p.isInt)) flags.add('FRACTION_NESTED');
+      else if (q.v.n === 1n) flags.add(q.text === '1' && denominator.vars.length ? 'NOTATION_ONE' : 'FRACTION_NOT_REDUCED');
+      else if (p && gcd(p.v.n, q.v.n) !== 1n) flags.add('FRACTION_NOT_REDUCED');
+    }
+    if (p && !q && p.isInt && !p.mixed && p.v.n === 1n && numerator.vars.length && numerator.nums.length === 1) flags.add('NOTATION_ONE');
+    if (p && isZeroRat(p.v) && (numerator.vars.length || denominator.vars.length)) flags.add('ZERO_COEFFICIENT_TERM');
+    const seen = new Set();
+    for (const name of numerator.vars) { if (seen.has(name)) flags.add('VAR_REPEATED'); seen.add(name); }
+    const seenDen = new Set();
+    for (const name of denominator.vars) {
+      if (seen.has(name)) flags.add('FRACTION_NOT_REDUCED');
+      if (seenDen.has(name)) flags.add('VAR_REPEATED');
+      seenDen.add(name);
+    }
+  }
+
+  // 式（1辺）の点検。flags に理由を足す
+  function inspectExpression(tree, flags) {
+    const terms = topTerms(tree, [], flags);
+    const keys = new Map();
+    for (const termNode of terms) {
+      inspectTerm(termNode, flags);
+      let value;
+      try { value = evaluate(termNode); } catch (_) { continue; }
+      if (value.size === 0) { if (terms.length > 1) flags.add('ZERO_COEFFICIENT_TERM'); continue; }
+      if (value.size > 1) { flags.add('NOT_EXPANDED'); continue; }
+      const key = [...value.keys()][0];
+      if (keys.has(key)) flags.add('NOT_COLLECTED');
+      keys.set(key, true);
+    }
+  }
+
+  function verdict(flags, options) {
+    const opts = options || {};
+    for (const reason of UNFINISHED) {
+      if (flags.has(reason)) {
+        const messageKey = reason === 'NOT_COLLECTED' && opts.numberAnswer ? 'NOT_COLLECTED_NUMBER' : reason;
+        return makeResult(STATUS.NOT_REDUCED, reason, { flags: [...flags], messageKey });
+      }
+    }
+    for (const reason of NOTATION) if (flags.has(reason)) return makeResult(STATUS.NOT_REDUCED, reason, { flags: [...flags] });
+    if (flags.has('NEG_DEN')) return makeResult(STATUS.NEG_DEN, 'NEGATIVE_DENOMINATOR', { flags: [...flags] });
+    return makeResult(STATUS.CORRECT, '', { flags: [...flags] });
+  }
+
+  // 1つの式を読んで、値と点検の flags を返す
+  function readExpression(src, vars, prepared) {
+    const parsed = parseTree(src, vars);
+    const flags = parsed.flags;
+    if (prepared && prepared.times) flags.add('NOTATION_TIMES');
+    if (prepared && prepared.div) flags.add('NOTATION_DIV');
+    return { tree: parsed.tree, value: evaluate(parsed.tree), flags };
+  }
+
+  function guarded(fn) {
+    try { return fn(); } catch (error) {
+      if (error instanceof ReadErr) return makeResult(STATUS.UNREADABLE, error.reason);
+      if (error instanceof SemErr) return makeResult(STATUS.WRONG, error.reason);
+      return makeResult(STATUS.UNREADABLE, 'SYNTAX');
+    }
+  }
+
+  const answerCache = new Map();
+  function expectedValue(text, vars) {
+    const key = `${text}|${(vars || []).join(',')}`;
+    if (!answerCache.has(key)) {
+      const s = graderCore().normalize(String(text)).s;
+      if (!s) throw new Error(`模範解答が読めません: ${text}`);
+      answerCache.set(key, evaluate(parseTree(s, vars).tree));
+    }
+    return answerCache.get(key);
+  }
+
+  // 「1,920」の3桁区切りを外す
+  function stripThousands(s) {
+    return /^[+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?$/.test(s) ? s.replace(/,/g, '') : s;
+  }
+
+  function decimalPlacesOf(src) {
+    const s = src.replace(/^[+]/, '');
+    const match = s.match(/^\d+(?:\.(\d+))?$/);
+    return match ? (match[1] || '').length : null;
+  }
+
+  function unitsFor(spec) {
+    const table = { g: ['g', 'グラム'], cm: ['cm', 'センチメートル', 'センチ'], '%': ['%', 'パーセント'], 円: ['円'], 人: ['人'], 時間: ['時間'] };
+    return table[spec.unit] || (spec.unit ? [spec.unit] : []);
+  }
+
+  function gradeNumberAnswer(question, raw) {
+    const spec = question.answerSpec;
+    const prepared = prepare(raw, unitsFor(spec));
+    if (prepared.result) return prepared.result;
+    let s = stripThousands(prepared.s);
+    if (/^[a-z]=/.test(s) || s.includes('=')) return makeResult(STATUS.UNREADABLE, 'EQUALS');
+    if (/[,<>≤≥]/.test(s)) return makeResult(STATUS.UNREADABLE, 'SEPARATOR');
+    return guarded(() => {
+      let read;
+      try { read = readExpression(s, [], prepared); } catch (error) {
+        if (error instanceof SemErr && error.reason === 'badVariable') throw new SemErr('unit');
+        throw error;
+      }
+      const expected = polyConst(ratFromDecimal(String(spec.canonicalValue)));
+      if (!polyEqual(read.value, expected)) {
+        if (spec.decimals !== null && spec.decimals !== undefined && question.generatedParams && question.generatedParams.part !== undefined) {
+          const exact = rat(BigInt(question.generatedParams.part) * 100n, BigInt(question.generatedParams.total));
+          const scale = 10n ** BigInt(spec.decimals);
+          const truncated = rat((exact.n * scale) / exact.d, scale);
+          if (polyEqual(read.value, polyConst(exact)) || polyEqual(read.value, polyConst(truncated))) return makeResult(STATUS.WRONG, 'NOT_ROUNDED');
+        }
+        return makeResult(STATUS.WRONG, read.value.size && [...read.value.keys()].some(Boolean) ? 'unit' : 'value');
+      }
+      if (prepared.otherUnit) return makeResult(STATUS.WRONG, 'unit');
+      inspectExpression(read.tree, read.flags);
+      const result = verdict(read.flags, { numberAnswer: true });
+      if (result.status === STATUS.CORRECT && spec.decimals !== null && spec.decimals !== undefined && decimalPlacesOf(s) !== spec.decimals) {
+        return makeResult(STATUS.NOT_REDUCED, 'DECIMAL_PLACES', { message: `書き方：小数第${spec.decimals}位まで書こう` });
+      }
+      return result;
+    });
+  }
+
+  // 「12,34」「12分34秒」「12分,34秒」
+  function gradePairAnswer(question, raw) {
+    const spec = question.answerSpec;
+    const text = raw == null ? '' : String(raw);
+    const GC = graderCore();
+    if (GC.isBlank(text)) return makeResult(STATUS.EMPTY, 'empty');
+    let source = toHalfWidth(text).replace(/\\(?:text|mathrm)\s*\{([^{}]*)\}/g, '$1').replace(/\\ /g, '');
+    source = source.replace(/\s*秒\s*$/, '').replace(/分\s*,?\s*/g, ',');
+    const prepared = prepare(source, []);
+    if (prepared.result) return prepared.result;
+    const chunks = prepared.s.split(',');
+    if (chunks.some(chunk => chunk === '')) return makeResult(STATUS.UNREADABLE, 'INCOMPLETE');
+    if (chunks.length === 1) return makeResult(STATUS.UNREADABLE, 'PAIR_SPLIT');
+    if (chunks.length !== 2) return makeResult(STATUS.WRONG, 'count');
+    return guarded(() => {
+      const flags = new Set();
+      let allMatch = true;
+      chunks.forEach((chunk, index) => {
+        const read = readExpression(chunk, [], prepared);
+        if (!polyEqual(read.value, polyConst(ratFromDecimal(String(spec.canonicalValue[index]))))) allMatch = false;
+        inspectExpression(read.tree, read.flags);
+        read.flags.forEach(flag => flags.add(flag));
+      });
+      if (!allMatch) return makeResult(STATUS.WRONG, 'value');
+      if (prepared.otherUnit) return makeResult(STATUS.WRONG, 'unit');
+      return verdict(flags, { numberAnswer: true });
+    });
+  }
+
+  // 自然数をすべて答える（順不同。n= は付けてもよい）
+  function gradeSetAnswer(question, raw) {
+    const spec = question.answerSpec;
+    const prepared = prepare(raw, []);
+    if (prepared.result) return prepared.result;
+    const s = prepared.s.replace(/^n=/, '');
+    const chunks = s.split(',').map(chunk => chunk.replace(/^n=/, ''));
+    if (chunks.some(chunk => chunk === '')) return makeResult(STATUS.UNREADABLE, 'INCOMPLETE');
+    if (chunks.some(chunk => /[=<>≤≥]/.test(chunk))) return makeResult(STATUS.UNREADABLE, 'SYNTAX');
+    return guarded(() => {
+      const flags = new Set();
+      const values = chunks.map(chunk => {
+        const read = readExpression(chunk, [], prepared);
+        inspectExpression(read.tree, read.flags);
+        read.flags.forEach(flag => flags.add(flag));
+        if (read.value.size > 1 || [...read.value.keys()].some(Boolean)) throw new SemErr('value');
+        return read.value.get('') || RAT_ZERO;
+      });
+      const keyOfValue = value => `${value.n}/${value.d}`;
+      const expected = new Set(spec.canonicalValue.map(value => keyOfValue(ratFromDecimal(String(value)))));
+      const given = new Set(values.map(keyOfValue));
+      if (given.size !== expected.size || [...given].some(key => !expected.has(key))) {
+        return makeResult(STATUS.WRONG, given.size < expected.size ? 'missing' : 'value', { messageKey: 'count' });
+      }
+      if (values.length !== given.size) flags.add('DUPLICATE_SOLUTION');
+      if (prepared.otherUnit) return makeResult(STATUS.WRONG, 'unit');
+      return verdict(flags, { numberAnswer: true });
+    });
+  }
+
+  // 文字式（合計金額・時間）
+  function gradeExpressionAnswer(question, raw) {
+    const spec = question.answerSpec;
+    const prepared = prepare(raw, unitsFor(spec));
+    if (prepared.result) return prepared.result;
+    if (prepared.s.includes('=')) return makeResult(STATUS.UNREADABLE, 'EQUALS');
+    if (/[,<>≤≥]/.test(prepared.s)) return makeResult(STATUS.UNREADABLE, 'SEPARATOR');
+    return guarded(() => {
+      const read = readExpression(prepared.s, spec.allowedVariables, prepared);
+      if (!polyEqual(read.value, expectedValue(spec.canonicalValue, spec.allowedVariables))) return makeResult(STATUS.WRONG, 'value');
+      if (prepared.otherUnit) return makeResult(STATUS.WRONG, 'unit');
+      inspectExpression(read.tree, read.flags);
+      return verdict(read.flags);
+    });
+  }
+
+  // 不等式。左右の入れ替え・移項・両辺の正の数倍（負の数倍は向きを変えたもの）を同じとみる
+  function linearVector(value) {
+    const vector = { constant: RAT_ZERO, coefficients: {} };
+    for (const [key, coefficient] of value) {
+      if (key === '') vector.constant = coefficient;
+      else if (/^[a-z]\^1$/.test(key)) vector.coefficients[key[0]] = coefficient;
+      else throw new SemErr('value');
+    }
+    return vector;
+  }
+  function inequalityOf(left, right, relation) {
+    let vector = linearVector(polyAdd(left, right, -1));
+    let normalized = relation;
+    if (relation === '>' || relation === '≥') {
+      vector = scaleLinear(vector, negRat(RAT_ONE));
+      normalized = relation === '>' ? '<' : '≤';
+    }
+    if (!hasVariables(vector)) throw new SemErr('value');
+    return { relation: normalized, vector };
+  }
+  function gradeInequalityAnswer(question, raw) {
+    const spec = question.answerSpec;
+    const prepared = prepare(raw, []);
+    if (prepared.result) {
+      return prepared.result.reason === 'ANSWER_ONLY' ? makeResult(STATUS.UNREADABLE, 'INEQ_ONLY') : prepared.result;
+    }
+    if (prepared.otherUnit) return makeResult(STATUS.UNREADABLE, 'INEQ_ONLY');
+    const s = prepared.s;
+    if (s.includes(',')) return makeResult(STATUS.UNREADABLE, 'SEPARATOR');
+    const relations = [...s.matchAll(/[<>≤≥=]/g)];
+    if (!relations.length) {
+      const read = guarded(() => { readExpression(s, spec.allowedVariables, prepared); return null; });
+      return read && read.status === STATUS.UNREADABLE ? read : makeResult(STATUS.WRONG, 'NO_RELATION');
+    }
+    if (relations.length > 1) return makeResult(STATUS.WRONG, 'relation');
+    const relation = relations[0][0];
+    const leftSource = s.slice(0, relations[0].index);
+    const rightSource = s.slice(relations[0].index + 1);
+    if (!leftSource || !rightSource) return makeResult(STATUS.UNREADABLE, 'INCOMPLETE');
+    return guarded(() => {
+      const left = readExpression(leftSource, spec.allowedVariables, prepared);
+      const right = readExpression(rightSource, spec.allowedVariables, prepared);
+      if (relation === '=') return makeResult(STATUS.WRONG, 'relation');
+      const expectedSource = graderCore().normalize(spec.canonicalValue).s;
+      const expectedMatch = expectedSource.match(/[<>≤≥]/);
+      const expected = inequalityOf(
+        evaluate(parseTree(expectedSource.slice(0, expectedMatch.index), spec.allowedVariables).tree),
+        evaluate(parseTree(expectedSource.slice(expectedMatch.index + 1), spec.allowedVariables).tree),
+        expectedMatch[0]);
+      const actual = inequalityOf(left.value, right.value, relation);
+      if (!sameInequality(actual, expected)) {
+        const flipped = { relation: actual.relation === '<' ? '≤' : '<', vector: actual.vector };
+        return makeResult(STATUS.WRONG, sameInequality(flipped, expected) ? 'relation' : 'value');
+      }
+      const flags = new Set();
+      inspectExpression(left.tree, left.flags);
+      inspectExpression(right.tree, right.flags);
+      left.flags.forEach(flag => flags.add(flag));
+      right.flags.forEach(flag => flags.add(flag));
+      return verdict(flags);
+    });
+  }
+
+  function gradeAnswer(question, raw) {
+    const kind = question && question.answerSpec && question.answerSpec.kind;
+    if (kind === 'number') return gradeNumberAnswer(question, raw);
+    if (kind === 'integerPair') return gradePairAnswer(question, raw);
+    if (kind === 'naturalSet') return gradeSetAnswer(question, raw);
+    if (kind === 'linearExpression' || kind === 'monomialExpression') return gradeExpressionAnswer(question, raw);
+    if (kind === 'inequality') return gradeInequalityAnswer(question, raw);
+    throw new Error(`知らない答えの種類: ${kind}`);
+  }
+
+  // 誤答のときに画面へ出す「確認ポイント」のコード（従来の誤答分類）
+  const WRONG_CODES = { number: 'QTY-BASE', integerPair: 'QTY-UNIT', naturalSet: 'QTY-NATURAL', linearExpression: 'QTY-RELATION', monomialExpression: 'QTY-RELATION', inequality: 'QTY-INEQ' };
+
+  // 従来の呼び方（tests.mjs など）。ok は ○ のときだけ true
+  function grade(question, input) {
+    const result = gradeAnswer(question, input);
+    let code = '';
+    if (result.status === STATUS.EMPTY || result.status === STATUS.UNREADABLE) code = 'INCOMPLETE_ANSWER';
+    else if (result.reason === 'DECIMAL_PLACES') code = 'UNIT_FORMAT';
+    else if (result.status !== STATUS.CORRECT) code = WRONG_CODES[question.answerSpec.kind] || 'UNCLASSIFIED';
+    return Object.assign({ ok: result.status === STATUS.CORRECT, code }, result);
+  }
+
+  // 採点して消費する（記録・ロックする）結果か。空欄・書きかけは false
+  function consumes(result) {
+    return !!result && result.status !== STATUS.EMPTY && result.status !== STATUS.UNREADABLE;
+  }
+  function mark(result) {
+    const status = result && result.status;
+    return status === STATUS.CORRECT ? '○' : status === STATUS.NEG_DEN ? '△' : '×';
   }
 
   return {
@@ -684,6 +1347,10 @@
     fnv1a,
     makeSession,
     grade,
+    gradeAnswer,
+    consumes,
+    mark,
+    MESSAGES,
     parseLinear,
     parseMonomial,
     parseInequality,
@@ -692,3 +1359,8 @@
     canonical
   };
 }));
+
+// DOM に触らない採点関数（回帰テストと main.js が使う）。{ status, kind, reason, message, flags } を返す
+function gradeAnswer(question, raw) { // eslint-disable-line no-unused-vars
+  return QuantityRelationsQuestions.gradeAnswer(question, raw); // eslint-disable-line no-undef
+}

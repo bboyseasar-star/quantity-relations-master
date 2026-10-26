@@ -14,6 +14,8 @@ MIT Licenseの参考要約として、著作権表示とライセンス表示を
 
 MathJax（Apache-2.0）、MathLive（MIT）、BIZ UDPGothicおよびOutfit（OFL-1.1）を使用します。第三者部分は各ライセンスに従います。バージョン、配布元、通信先は`DEPENDENCIES.md`に記載しています。
 
+同梱の `grader-core.js` と `handwriting.js` は作成者による自作のプログラムで、第三者のコードを含みません。上記のMIT Licenseの対象（作者が権利を有する独自プログラム）に含まれます。
+
 ## 保存と外部通信
 
 氏名、学校名、学籍番号などの個人情報は収集しません。端末内のlocalStorageには通常セットの得点履歴（最大20件）、最高得点、直前の誤答形式を識別する内部メタデータを保存します。使用するキーは`nyushi-daimon2:v2:course:quantity-relations`と`nyushi-daimon2:v2:history:quantity-relations`です。答案本文、復習結果は保存しません。「この端末の記録を消す」は、この2キーだけを確認後に削除します。

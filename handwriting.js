@@ -1,7 +1,8 @@
 (function () {
   'use strict';
 
-  const PROTECTED_SELECTOR = 'button, math-field, input, textarea, select, a, [role="button"], label';
+  // MathLive の仮想キーボード（0.101.0 の要素名）のキーを押しても線を書かない
+  const PROTECTED_SELECTOR = 'button, math-field, input, textarea, select, a, [role="button"], label, .ML__keyboard, .ML__keyboard *, [class^="MLK__"], [class*=" MLK__"]';
   const state = {
     mounted: false,
     available: false,
